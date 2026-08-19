@@ -1,0 +1,254 @@
+const express = require('express');
+const router = express.Router();
+const pool = require('../config/database');
+const { updateUserMultiplier } = require('../services/multiplierHelper');
+
+router.post('/purchase/:id', async (req, res) => {
+    const client = await pool.connect();
+    
+    try {
+        const { id } = req.params;
+        
+        console.log(`🔄 İade isteği alındı: Purchase ID ${id}`);
+
+        // 1. Satın alma isteğini kontrol et
+        const purchase = await client.query(`
+            SELECT 
+                pr.id,
+                pr.user_id,
+                pr.plan_name,
+                pr.amount,
+                pr.cv,
+                pr.kv,
+                pr.status
+            FROM purchase_requests pr
+            WHERE pr.id = $1 AND pr.status = 'approved'
+        `, [id]);
+
+        if (purchase.rows.length === 0) {
+            return res.status(404).json({ 
+                success: false, 
+                error: 'Satın alma bulunamadı veya zaten iptal edilmiş' 
+            });
+        }
+
+        const data = purchase.rows[0];
+        const userId = data.user_id;
+        const amount = parseFloat(data.amount);
+        const cv = parseFloat(data.cv) || 0;
+        const kv = parseFloat(data.kv) || amount;
+
+        // plan_name'i temizle
+        let cleanPlan = data.plan_name;
+        if (cleanPlan.includes('Lite')) cleanPlan = 'Lite';
+        else if (cleanPlan.includes('Plus')) cleanPlan = 'Plus';
+        else if (cleanPlan.includes('Pro')) cleanPlan = 'Pro';
+
+        console.log(`🔄 İade: ${data.plan_name} → ${cleanPlan} ($${amount}) - Kullanıcı: ${userId}`);
+
+        await client.query('BEGIN');
+
+        // 2. SATIN ALMA İSTEĞİNİ GÜNCELLE
+        await client.query(`
+            UPDATE purchase_requests 
+            SET status = 'refunded', updated_at = NOW() 
+            WHERE id = $1
+        `, [id]);
+
+        console.log(`📝 Satın alma isteği güncellendi: status = refunded`);
+
+        // 3. KULLANICININ VERİLERİNİ DÜŞÜR
+        await client.query(`
+            UPDATE users SET 
+                kv = GREATEST(kv - $1, 0),
+                personal_cv = GREATEST(personal_cv - $2, 0),
+                personal_pv = GREATEST(personal_pv - $2, 0),
+                left_cv = GREATEST(left_cv - $2, 0),
+                right_cv = GREATEST(right_cv - $2, 0),
+                left_pv = GREATEST(left_pv - $2, 0),
+                right_pv = GREATEST(right_pv - $2, 0),
+                updated_at = NOW()
+            WHERE id = $3
+        `, [kv, cv, userId]);
+
+        console.log(`📊 KV düşüldü: ${kv}, CV düşüldü: ${cv}`);
+
+        // 4. 🔥 İADE EDİLEN PLANI İŞARETLE (is_refunded = true)
+        const updateResult = await client.query(`
+            UPDATE user_plans 
+            SET is_active = false, is_refunded = true 
+            WHERE user_id = $1 
+            AND plan_type = $2 
+            AND is_active = true
+            RETURNING id, plan_type, is_refunded
+        `, [userId, cleanPlan]);
+
+        if (updateResult.rows.length > 0) {
+            console.log(`✅ İade edilen plan işaretlendi: ${updateResult.rows[0].plan_type} (is_refunded = ${updateResult.rows[0].is_refunded})`);
+        } else {
+            console.log(`⚠️ İade edilecek aktif plan bulunamadı! (plan_type: ${cleanPlan})`);
+            
+            // Alternatif: plan_type'ı dene
+            console.log(`🔄 Alternatif olarak 'Pro' ile deneniyor...`);
+            const altResult = await client.query(`
+                UPDATE user_plans 
+                SET is_active = false, is_refunded = true 
+                WHERE user_id = $1 
+                AND plan_type = 'Pro' 
+                AND is_active = true
+                RETURNING id, plan_type, is_refunded
+            `, [userId]);
+            
+            if (altResult.rows.length > 0) {
+                console.log(`✅ Alternatif işlem başarılı: ${altResult.rows[0].plan_type} işaretlendi`);
+            } else {
+                console.log(`❌ Alternatif işlem de başarısız!`);
+            }
+        }
+
+        // 5. 🔥 ÜST KOLLARDAN CV/PV DÜŞ
+        try {
+            await distributeRefundToUpline(client, userId, cv);
+        } catch (distError) {
+            console.error('⚠️ Üst kollara dağıtım hatası:', distError);
+        }
+
+        // 6. 🔥 KALAN EN İYİ PLANI BUL (is_refunded = false)
+        const remainingPlan = await client.query(`
+            SELECT id, plan_type, expires_at 
+            FROM user_plans 
+            WHERE user_id = $1 
+            AND is_refunded = false 
+            AND expires_at > NOW()
+            ORDER BY 
+                CASE plan_type 
+                    WHEN 'Pro' THEN 3 
+                    WHEN 'Plus' THEN 2 
+                    WHEN 'Lite' THEN 1 
+                    ELSE 0 
+                END DESC,
+                expires_at DESC 
+            LIMIT 1
+        `, [userId]);
+
+        console.log(`📊 Kalan plan: ${remainingPlan.rows.length > 0 ? remainingPlan.rows[0].plan_type : 'YOK'}`);
+
+        if (remainingPlan.rows.length > 0) {
+            const plan = remainingPlan.rows[0];
+            
+            await client.query(`
+                UPDATE user_plans SET is_active = false WHERE user_id = $1
+            `, [userId]);
+            
+            await client.query(`
+                UPDATE user_plans SET is_active = true WHERE id = $1
+            `, [plan.id]);
+            
+            await client.query(`
+                UPDATE users SET 
+                    plan_type = $1, 
+                    plan_expires_at = $2,
+                    plan_started_at = NOW()
+                WHERE id = $3
+            `, [plan.plan_type, plan.expires_at, userId]);
+            
+            console.log(`✅ Kalan plan aktif yapıldı: ${plan.plan_type}`);
+            
+        } else {
+            await client.query(`
+                UPDATE users SET 
+                    plan_type = 'free',
+                    plan_expires_at = NULL,
+                    plan_started_at = NULL,
+                    multiplier = 0
+                WHERE id = $1
+            `, [userId]);
+            
+            console.log(`✅ Plan kalmadı, free yapıldı`);
+        }
+
+        // 7. 🔥 ÇARPANI GÜNCELLE
+        try {
+            await updateUserMultiplier(userId);
+            console.log(`📊 Çarpan güncellendi: Kullanıcı ${userId}`);
+        } catch (multiplierError) {
+            console.error('⚠️ Çarpan güncellenirken hata:', multiplierError);
+        }
+
+        await client.query('COMMIT');
+        console.log(`✅ TRANSACTION COMMIT YAPILDI!`);
+
+        const finalUser = await pool.query(`
+            SELECT id, name, kv, plan_type, plan_expires_at, multiplier 
+            FROM users WHERE id = $1
+        `, [userId]);
+
+        console.log(`📊 Son durum:`, finalUser.rows[0]);
+
+        res.json({
+            success: true,
+            message: `✅ ${data.plan_name} iade edildi!`,
+            refunded: {
+                plan: data.plan_name,
+                amount: amount,
+                kv: kv,
+                cv: cv
+            },
+            user: finalUser.rows[0]
+        });
+
+    } catch (error) {
+        await client.query('ROLLBACK');
+        console.error('❌ İade hatası:', error);
+        res.status(500).json({ error: error.message });
+    } finally {
+        client.release();
+    }
+});
+
+// 🔥 ÜST KOLLARDAN CV/PV DÜŞEN FONKSİYON
+async function distributeRefundToUpline(client, userId, amount) {
+    console.log(`📤 ${userId} için üst kollardan CV/PV düşülüyor...`);
+    let currentId = userId;
+    let chain = [];
+    let maxLoop = 20;
+    let loopCount = 0;
+    
+    while (loopCount < maxLoop) {
+        loopCount++;
+        
+        const result = await client.query(
+            'SELECT sponsor_id, position FROM users WHERE id = $1',
+            [currentId]
+        );
+        
+        if (result.rows.length === 0) break;
+        
+        const sponsorId = result.rows[0].sponsor_id;
+        const position = result.rows[0].position;
+        
+        if (!sponsorId || sponsorId === currentId) break;
+        
+        chain.push(sponsorId);
+        
+        if (position === 'left') {
+            await client.query(`
+                UPDATE users SET 
+                    left_cv = GREATEST(left_cv - $1, 0),
+                    left_pv = GREATEST(left_pv - $1, 0)
+                WHERE id = $2
+            `, [amount, sponsorId]);
+        } else if (position === 'right') {
+            await client.query(`
+                UPDATE users SET 
+                    right_cv = GREATEST(right_cv - $1, 0),
+                    right_pv = GREATEST(right_pv - $1, 0)
+                WHERE id = $2
+            `, [amount, sponsorId]);
+        }
+        currentId = sponsorId;
+    }
+    console.log(`✅ Üst kollardan CV/PV düşüldü: ${chain.join(' → ')} (${loopCount} adım)`);
+}
+
+module.exports = router;

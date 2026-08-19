@@ -1,0 +1,106 @@
+const express = require('express');
+const router = express.Router();
+const pool = require('../config/database');
+const { updateUserMultiplier } = require('../services/multiplierHelper');
+
+router.post('/purchase/:id', async (req, res) => {
+    try {
+        const { id } = req.params;
+        
+        console.log(`🔄 İade isteği alındı: Purchase ID ${id}`);
+
+        // 1. Satın alma isteğini kontrol et
+        const purchase = await pool.query(`
+            SELECT 
+                pr.id,
+                pr.user_id,
+                pr.plan_name,
+                pr.amount,
+                pr.cv,
+                pr.kv,
+                pr.status
+            FROM purchase_requests pr
+            WHERE pr.id = $1 AND pr.status = 'approved'
+        `, [id]);
+
+        if (purchase.rows.length === 0) {
+            return res.status(404).json({ 
+                success: false, 
+                error: 'Satın alma bulunamadı veya zaten iptal edilmiş' 
+            });
+        }
+
+        const data = purchase.rows[0];
+        const userId = data.user_id;
+        const amount = parseFloat(data.amount);
+        const cv = parseFloat(data.cv) || 0;
+        const kv = parseFloat(data.kv) || amount;
+
+        console.log(`🔄 İade: ${data.plan_name} ($${amount}) - Kullanıcı: ${userId}`);
+
+        // 2. 🔥 SATIN ALMA İSTEĞİNİ GÜNCELLE
+        await pool.query(`
+            UPDATE purchase_requests 
+            SET status = 'refunded', updated_at = NOW() 
+            WHERE id = $1
+        `, [id]);
+
+        // 3. 🔥 KULLANICININ VERİLERİNİ GERİ AL
+        await pool.query(`
+            UPDATE users SET 
+                kv = GREATEST(kv - $1, 0),
+                personal_cv = GREATEST(personal_cv - $2, 0),
+                personal_pv = GREATEST(personal_pv - $2, 0),
+                left_cv = GREATEST(left_cv - $2, 0),
+                right_cv = GREATEST(right_cv - $2, 0),
+                left_pv = GREATEST(left_pv - $2, 0),
+                right_pv = GREATEST(right_pv - $2, 0),
+                plan_type = 'free',
+                plan_expires_at = NULL,
+                updated_at = NOW()
+            WHERE id = $3
+        `, [kv, cv, userId]);
+
+        console.log(`📊 KV düşüldü: ${kv}, CV düşüldü: ${cv}`);
+        console.log(`✅ Kullanıcı ${userId} free plana geçirildi`);
+
+        // 4. 🔥 USER_PLANS TABLOSUNDAN TÜM PLANLARI SİL
+        await pool.query(`
+            DELETE FROM user_plans 
+            WHERE user_id = $1
+        `, [userId]);
+
+        console.log(`🗑️ Kullanıcı ${userId} tüm planları silindi`);
+
+        // 5. 🔥 ÇARPANI SIFIRLA
+        await pool.query(`
+            UPDATE users SET multiplier = 0 WHERE id = $1
+        `, [userId]);
+
+        // 6. 🔥 SON DURUMU GETİR
+        const finalUser = await pool.query(`
+            SELECT id, name, kv, plan_type, plan_expires_at, multiplier 
+            FROM users WHERE id = $1
+        `, [userId]);
+
+        console.log(`📊 Son durum:`, finalUser.rows[0]);
+
+        res.json({
+            success: true,
+            message: `✅ ${data.plan_name} iade edildi!`,
+            refunded: {
+                plan: data.plan_name,
+                amount: amount,
+                kv: kv,
+                cv: cv
+            },
+            user: finalUser.rows[0]
+        });
+
+    } catch (error) {
+        console.error('❌ İade hatası:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+module.exports = router;

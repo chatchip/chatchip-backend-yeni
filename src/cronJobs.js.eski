@@ -1,0 +1,121 @@
+const cron = require('node-cron');
+const pool = require('./config/database');
+const binaryService = require('./services/binaryService');
+const careerService = require('./services/careerService');
+const mlmEngine = require('./services/mlmEngine');
+
+// ============================================================
+// 🔄 HAFTALIK BINARY EŞLEŞTİRME (Her Pazar 23:59)
+// ============================================================
+cron.schedule('59 23 * * 0', async () => {
+    console.log('🔄 [CRON] Haftalık binary eşleştirme başlıyor...');
+    console.log(`📅 ${new Date().toLocaleString('tr-TR')}`);
+    
+    try {
+        // 1. Tüm kullanıcıları getir
+        const users = await pool.query('SELECT id, kv FROM users');
+        console.log(`👥 ${users.rows.length} kullanıcı işlenecek`);
+        
+        let totalEarnings = 0;
+        let matchedCount = 0;
+        
+        for (const user of users.rows) {
+            // 2. Her kullanıcı için eşleştirme yap
+            const result = await mlmEngine.runWeeklyMatch(user.id);
+            
+            if (result.status === 'success') {
+                totalEarnings += result.earned || 0;
+                matchedCount++;
+            }
+        }
+        
+        // 3. Pasif kullanıcıların CV'lerini sıfırla
+        await pool.query(`
+            UPDATE users 
+            SET left_cv = 0, right_cv = 0 
+            WHERE kv < 45
+        `);
+        
+        console.log(`✅ ${matchedCount} kullanıcı eşleştirildi`);
+        console.log(`💰 Toplam kazanç: $${totalEarnings.toFixed(2)}`);
+        console.log('✅ [CRON] Haftalık binary eşleştirme tamamlandı!');
+        
+    } catch (error) {
+        console.error('❌ [CRON] Haftalık eşleştirme hatası:', error);
+    }
+});
+
+// ============================================================
+// 🔄 AYLIK KARİYER HESAPLAMA (Her ay sonu 23:59)
+// ============================================================
+cron.schedule('59 23 L * *', async () => {
+    console.log('🔄 [CRON] Aylık kariyer hesaplama başlıyor...');
+    console.log(`📅 ${new Date().toLocaleString('tr-TR')}`);
+    
+    try {
+        // 1. Tüm kullanıcıların kariyerlerini hesapla
+        const users = await pool.query('SELECT id FROM users');
+        let promotedCount = 0;
+        
+        for (const user of users.rows) {
+            const result = await careerService.calculateUserCareer(user.id);
+            if (result.promoted) {
+                promotedCount++;
+                console.log(`   ⭐ ${result.userId}: ${result.oldCareer} → ${result.newCareer}`);
+            }
+        }
+        
+        // 2. Tüm PV'leri sıfırla
+        await careerService.resetMonthlyPV();
+        
+        console.log(`✅ ${promotedCount} kullanıcı terfi etti`);
+        console.log('✅ [CRON] Aylık kariyer hesaplama tamamlandı!');
+        
+    } catch (error) {
+        console.error('❌ [CRON] Aylık kariyer hatası:', error);
+    }
+});
+
+// ============================================================
+// 🔄 GÜNLÜK PLAN KONTROLÜ (Her gün 00:00)
+// ============================================================
+cron.schedule('0 0 * * *', async () => {
+    console.log('🔄 [CRON] Günlük plan kontrolü başlıyor...');
+    
+    try {
+        // Planı bitenleri bul ve uyarı log'la
+        const expired = await pool.query(`
+            SELECT id, name, email, plan_type, plan_expires_at 
+            FROM users 
+            WHERE plan_expires_at < NOW() 
+            AND plan_type != 'free'
+        `);
+        
+        if (expired.rows.length > 0) {
+            console.log(`⚠️ ${expired.rows.length} kullanıcının planı sona erdi:`);
+            expired.rows.forEach(u => {
+                console.log(`   - ${u.name} (${u.email}): ${u.plan_type} planı bitti`);
+            });
+        } else {
+            console.log('✅ Planı biten kullanıcı yok');
+        }
+        
+    } catch (error) {
+        console.error('❌ [CRON] Plan kontrol hatası:', error);
+    }
+});
+
+console.log('✅ Cron job\'lar başlatıldı!');
+console.log('   📅 Haftalık eşleştirme: Her Pazar 23:59');
+console.log('   📅 Aylık kariyer: Her ay sonu 23:59');
+console.log('   📅 Günlük plan kontrolü: Her gün 00:00');
+
+// ============================================================
+// 🗑️ SÜRESİ DOLAN DOSYALARI TEMİZLE (Her saat)
+// ============================================================
+const { cleanExpiredFiles } = require('./routes/upload.routes');
+
+cron.schedule('0 * * * *', async () => {
+    console.log('🔄 [CRON] Süresi dolan dosyalar temizleniyor...');
+    await cleanExpiredFiles();
+});

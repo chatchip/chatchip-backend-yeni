@@ -1,0 +1,265 @@
+const pool = require('../config/database');
+const mlmEngine = require('./mlmEngine');
+const { updateUserMultiplier } = require('./multiplierHelper');
+
+// 📊 PLAN - VERSİYON EŞLEŞTİRMESİ
+const PLAN_VERSION_MAP = {
+    'Lite': '1.0',
+    'Plus': '2.0',
+    'Pro': '2.1'
+};
+
+// 📊 PLAN ÖNCELİK SIRALAMASI (En yüksekten düşüğe)
+const PLAN_PRIORITY = {
+    'Pro': 3,
+    'Plus': 2,
+    'Lite': 1,
+    'free': 0
+};
+
+class PurchaseService {
+    
+    // 🔥 Yeni plan satın al - EN ÜST PLAN AKTİF OLSUN
+    async processPurchase(userId, amount, cv, kv, planName, period) {
+        console.log(`🔄 ${userId} için satın alma işleniyor: $${amount}, Plan: ${planName}, Period: ${period}`);
+
+        try {
+            // 1. Plan tipini temizle
+            let cleanPlan = planName;
+            if (planName.includes('Lite')) cleanPlan = 'Lite';
+            else if (planName.includes('Plus')) cleanPlan = 'Plus';
+            else if (planName.includes('Pro')) cleanPlan = 'Pro';
+            else {
+                return { success: false, error: 'Geçersiz plan' };
+            }
+
+            // 2. Versiyonu belirle
+            const version = PLAN_VERSION_MAP[cleanPlan];
+            if (!version) {
+                return { success: false, error: 'Versiyon bulunamadı' };
+            }
+
+            // 3. Süre hesapla (STACK - mevcut süreye ekle)
+            let durationMs = 0;
+            const periodLower = (period || 'monthly').toLowerCase();
+            switch(periodLower) {
+                case 'monthly': durationMs = 30 * 24 * 60 * 60 * 1000; break;
+                case 'quarterly': durationMs = 90 * 24 * 60 * 60 * 1000; break;
+                case 'semiannual': durationMs = 180 * 24 * 60 * 60 * 1000; break;
+                case 'yearly': durationMs = 365 * 24 * 60 * 60 * 1000; break;
+                default: durationMs = 30 * 24 * 60 * 60 * 1000;
+            }
+            
+            let expiresAt;
+            const now = new Date();
+            
+            // Mevcut aktif planı kontrol et (stack için)
+            const currentPlan = await pool.query(`
+                SELECT expires_at FROM user_plans 
+                WHERE user_id = $1 AND is_active = true AND expires_at > NOW()
+                ORDER BY expires_at DESC
+                LIMIT 1
+            `, [userId]);
+            
+            if (currentPlan.rows.length > 0) {
+                // 🔥 Kalan süreyi hesapla (stack)
+                const remainingMs = new Date(currentPlan.rows[0].expires_at) - now;
+                if (remainingMs > 0) {
+                    expiresAt = new Date(now.getTime() + remainingMs + durationMs);
+                    console.log(`📊 Kalan süreye ekleniyor: ${Math.round(remainingMs / (1000 * 60 * 60 * 24))} gün + ${Math.round(durationMs / (1000 * 60 * 60 * 24))} gün = ${Math.round((remainingMs + durationMs) / (1000 * 60 * 60 * 24))} gün`);
+                } else {
+                    expiresAt = new Date(now.getTime() + durationMs);
+                }
+            } else {
+                expiresAt = new Date(now.getTime() + durationMs);
+            }
+            console.log(`📅 Süre: ${periodLower}, Yeni Bitiş: ${expiresAt}`);
+
+            // 4. Yeni planı EKLE (is_active = false olarak başla)
+            const insertResult = await pool.query(`
+                INSERT INTO user_plans (user_id, plan_type, version, started_at, expires_at, is_active)
+                VALUES ($1, $2, $3, NOW(), $4, false)
+                RETURNING id
+            `, [userId, cleanPlan, version, expiresAt]);
+
+            console.log(`✅ Yeni plan eklendi: ${cleanPlan} (${version}), ID: ${insertResult.rows[0].id}, bitiş: ${expiresAt}`);
+
+            // 5. 🔥 Kullanıcının en yüksek öncelikli planını aktif yap
+            await this.activateBestPlan(userId);
+
+            // 6. Kullanıcının verilerini güncelle (CV, PV, KV)
+            await pool.query(`
+                UPDATE users SET 
+                    personal_cv = personal_cv + $1,
+                    personal_pv = personal_pv + $1,
+                    kv = kv + $2,
+                    updated_at = NOW()
+                WHERE id = $3
+            `, [cv, kv, userId]);
+
+            // 7. KV geçmişine ekle
+            if (kv > 0) {
+                await pool.query(`
+                    INSERT INTO kv_history (user_id, amount, earned_at)
+                    VALUES ($1, $2, NOW())
+                `, [userId, kv]);
+            }
+
+            // 8. 🔥 Çarpanı güncelle (mlmEngine üzerinden)
+            await updateUserMultiplier(userId);
+
+            // 9. Üst kollara dağıt
+            await this.distributeToUpline(userId, cv);
+
+            return { 
+                success: true, 
+                plan: cleanPlan,
+                version: version,
+                expiresAt: expiresAt,
+                planId: insertResult.rows[0].id
+            };
+        } catch (error) {
+            console.error('❌ processPurchase hatası:', error);
+            return { success: false, error: error.message };
+        }
+    }
+
+    // 🔥 Kullanıcının en yüksek öncelikli planını aktif yap (users tablosunu da güncelle)
+    async activateBestPlan(userId) {
+        // Kullanıcının tüm planlarını öncelik sırasına göre getir
+        const result = await pool.query(`
+            SELECT id, plan_type, expires_at 
+            FROM user_plans 
+            WHERE user_id = $1 AND expires_at > NOW()
+            ORDER BY 
+                CASE plan_type 
+                    WHEN 'Pro' THEN 3 
+                    WHEN 'Plus' THEN 2 
+                    WHEN 'Lite' THEN 1 
+                    ELSE 0 
+                END DESC,
+                expires_at DESC
+            LIMIT 1
+        `, [userId]);
+
+        // Önce tüm planları pasif yap
+        await pool.query(`
+            UPDATE user_plans 
+            SET is_active = false 
+            WHERE user_id = $1
+        `, [userId]);
+
+        if (result.rows.length > 0) {
+            // En yüksek öncelikli planı aktif yap
+            const { id, plan_type, expires_at } = result.rows[0];
+            await pool.query(`
+                UPDATE user_plans SET is_active = true WHERE id = $1
+            `, [id]);
+            
+            console.log(`✅ ${plan_type} planı aktif yapıldı (bitiş: ${expires_at})`);
+            
+            // 🔥 USERS TABLOSUNU DA GÜNCELLE
+            await pool.query(`
+                UPDATE users 
+                SET plan_type = $1, plan_expires_at = $2 
+                WHERE id = $3
+            `, [plan_type, expires_at, userId]);
+            
+            console.log(`📊 users tablosu güncellendi: ${plan_type}, bitiş: ${expires_at}`);
+            
+            return { success: true, plan_type, expires_at };
+        } else {
+            // Hiç plan yoksa free yap
+            await pool.query(`
+                UPDATE users SET plan_type = 'free', plan_expires_at = NULL WHERE id = $1
+            `, [userId]);
+            console.log(`📌 Kullanıcı ${userId} için plan yok, free yapıldı`);
+            return { success: true, plan_type: 'free' };
+        }
+    }
+
+    // 🔥 Plan süresi dolanları kontrol et ve otomatik geçiş yap
+    async checkAndSwitchExpiredPlans() {
+        console.log('🔄 Plan süresi kontrolü başlıyor...');
+        
+        try {
+            // Süresi dolan planları pasif yap
+            const expiredResult = await pool.query(`
+                UPDATE user_plans 
+                SET is_active = false 
+                WHERE is_active = true AND expires_at < NOW()
+                RETURNING user_id, plan_type
+            `);
+
+            if (expiredResult.rows.length > 0) {
+                console.log(`⏰ ${expiredResult.rows.length} plan süresi doldu, pasif yapıldı`);
+                
+                const userIds = [...new Set(expiredResult.rows.map(r => r.user_id))];
+                
+                for (const userId of userIds) {
+                    await this.activateBestPlan(userId);
+                }
+            } else {
+                console.log('✅ Süresi dolan plan yok');
+            }
+        } catch (error) {
+            console.error('❌ Plan kontrol hatası:', error);
+        }
+    }
+
+    // 🔥 Üst kollara CV/PV dağıt
+    async distributeToUpline(userId, amount) {
+        console.log(`📤 ${userId} için üst kollara dağıtım başlıyor...`);
+        let currentId = userId;
+        let chain = [];
+        let maxLoop = 20;
+        
+        while (maxLoop-- > 0) {
+            const result = await pool.query(
+                'SELECT sponsor_id, position FROM users WHERE id = $1',
+                [currentId]
+            );
+            
+            if (result.rows.length === 0) break;
+            
+            const sponsorId = result.rows[0].sponsor_id;
+            const position = result.rows[0].position;
+            
+            if (!sponsorId) break;
+            
+            chain.push(sponsorId);
+            
+            if (position === 'left') {
+                await pool.query(`
+                    UPDATE users SET 
+                        left_cv = left_cv + $1, 
+                        left_pv = left_pv + $1 
+                    WHERE id = $2
+                `, [amount, sponsorId]);
+            } else if (position === 'right') {
+                await pool.query(`
+                    UPDATE users SET 
+                        right_cv = right_cv + $1, 
+                        right_pv = right_pv + $1 
+                    WHERE id = $2
+                `, [amount, sponsorId]);
+            }
+            currentId = sponsorId;
+        }
+        console.log(`✅ Dağıtım tamamlandı: ${chain.join(' → ')}`);
+        return chain;
+    }
+
+    // 📊 Kullanıcının aktif planlarını getir
+    async getUserPlans(userId) {
+        const result = await pool.query(`
+            SELECT id, plan_type, version, started_at, expires_at, is_active
+            FROM user_plans 
+            WHERE user_id = $1 AND is_active = true AND expires_at > NOW()
+            ORDER BY expires_at DESC
+        `, [userId]);
+        return result.rows;
+    }
+}
+
+module.exports = new PurchaseService();

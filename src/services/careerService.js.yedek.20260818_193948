@@ -1,0 +1,98 @@
+const pool = require('../config/database');
+const mlmEngine = require('./mlmEngine');
+
+class CareerService {
+    
+    // 📊 Aylık kariyer hesapla
+    async calculateMonthlyCareers() {
+        console.log('🔄 Aylık kariyer hesaplama başlıyor...');
+        const users = await pool.query('SELECT id FROM users');
+        const results = [];
+        
+        for (const user of users.rows) {
+            const result = await this.calculateUserCareer(user.id);
+            results.push(result);
+        }
+        
+        console.log('✅ Aylık kariyer hesaplama tamamlandı!');
+        return results;
+    }
+
+    // 📊 Tek kullanıcı için kariyer hesapla
+    async calculateUserCareer(userId) {
+        try {
+            const leftPV = await mlmEngine.getLegPV(userId, 'left');
+            const rightPV = await mlmEngine.getLegPV(userId, 'right');
+            
+            const counts = await mlmEngine.getLegCareerCounts(userId);
+            const newCareer = mlmEngine.evaluateCareer(leftPV, rightPV, counts);
+            
+            const user = await pool.query('SELECT career_level, highest_career FROM users WHERE id = $1', [userId]);
+            const oldCareer = user.rows[0]?.career_level || 'Starter';
+            
+            // 🎁 Kariyer ödülü hesapla
+            const reward = await mlmEngine.getReward(newCareer);
+            const kv = await mlmEngine.calculateKV(userId);
+            const isActive = mlmEngine.isActive(kv);
+            const finalReward = isActive ? reward : 0;
+            
+            // Kariyeri güncelle
+            await pool.query(`
+                UPDATE users SET 
+                    career_level = $1,
+                    highest_career = CASE 
+                        WHEN $2 > highest_career THEN $2 
+                        ELSE highest_career 
+                    END
+                WHERE id = $3
+            `, [newCareer, newCareer, userId]);
+            
+            // Kariyer geçmişine kaydet
+            await pool.query(`
+                INSERT INTO career_history (user_id, old_career, new_career, left_pv, right_pv, reward, promoted)
+                VALUES ($1, $2, $3, $4, $5, $6, $7)
+            `, [userId, oldCareer, newCareer, leftPV, rightPV, finalReward, oldCareer !== newCareer]);
+            
+            // 🔥 Ödülü users tablosuna ekle
+            if (finalReward > 0) {
+                await pool.query(`
+                    UPDATE users SET 
+                        total_rewards = COALESCE(total_rewards, 0) + $1,
+                        available_balance = COALESCE(available_balance, 0) + $1
+                    WHERE id = $2
+                `, [finalReward, userId]);
+                console.log(`💰 Kullanıcı ${userId} ${finalReward}$ kariyer ödülü kazandı!`);
+            }
+            
+            return {
+                userId,
+                oldCareer,
+                newCareer,
+                leftPV,
+                rightPV,
+                reward: finalReward,
+                promoted: oldCareer !== newCareer,
+                status: 'success'
+            };
+        } catch (error) {
+            console.error(`Kullanıcı ${userId} kariyer hatası:`, error.message);
+            return { userId, status: 'error', error: error.message };
+        }
+    }
+
+    // 📊 Aylık PV'leri sıfırla
+    async resetMonthlyPV() {
+        await pool.query('UPDATE users SET left_pv = 0, right_pv = 0');
+        console.log('✅ Tüm PV\'ler sıfırlandı');
+    }
+
+    // 📊 Kariyerleri sıfırla (Starter'a döndür)
+    async resetCareers() {
+        await pool.query(`
+            UPDATE users SET career_level = 'Starter'
+        `);
+        console.log('✅ Tüm kariyerler sıfırlandı (Starter)');
+    }
+}
+
+module.exports = new CareerService();

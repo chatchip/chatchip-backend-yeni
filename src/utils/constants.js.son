@@ -1,0 +1,200 @@
+// ============================================================
+// CHATCHIP SABİTLER
+// ============================================================
+
+// 📊 KV Çarpan Tablosu
+const KV_MULTIPLIERS = [
+    { min: 0, max: 44, multiplier: 0, label: 'Pasif' },
+    { min: 45, max: 74, multiplier: 0.09, label: '%9' },
+    { min: 75, max: 104, multiplier: 0.10, label: '%10' },
+    { min: 105, max: 179, multiplier: 0.11, label: '%11' },
+    { min: 180, max: 299, multiplier: 0.12, label: '%12' },
+    { min: 300, max: 419, multiplier: 0.13, label: '%13' },
+    { min: 420, max: null, multiplier: 0.15, label: '%15' }
+];
+
+// 📊 Kariyer Seviyeleri
+const CAREER_LEVELS = {
+    STARTER: 'Starter',
+    PIONEER: 'Pioneer',
+    STAR: 'Star',
+    LEADER: 'Leader',
+    EMERALD: 'Emerald',
+    DIAMOND: 'Diamond',
+    BLUE_DIAMOND: 'Blue Diamond',
+    GREEN_DIAMOND: 'Green Diamond',
+    RED_DIAMOND: 'Red Diamond'
+};
+
+// 📊 Kariyer Şartları
+const CAREER_REQUIREMENTS = {
+    [CAREER_LEVELS.PIONEER]: { minPV: 1000, requiredCareer: null, count: 0 },
+    [CAREER_LEVELS.STAR]: { minPV: 0, requiredCareer: CAREER_LEVELS.PIONEER, count: 2 },
+    [CAREER_LEVELS.LEADER]: { minPV: 0, requiredCareer: CAREER_LEVELS.STAR, count: 2 },
+    [CAREER_LEVELS.EMERALD]: { minPV: 0, requiredCareer: CAREER_LEVELS.LEADER, count: 2 },
+    [CAREER_LEVELS.DIAMOND]: { minPV: 0, requiredCareer: CAREER_LEVELS.EMERALD, count: 2 },
+    [CAREER_LEVELS.BLUE_DIAMOND]: { minPV: 0, requiredCareer: CAREER_LEVELS.DIAMOND, count: 2 },
+    [CAREER_LEVELS.GREEN_DIAMOND]: { minPV: 0, requiredCareer: CAREER_LEVELS.BLUE_DIAMOND, count: 2 },
+    [CAREER_LEVELS.RED_DIAMOND]: { minPV: 0, requiredCareer: CAREER_LEVELS.GREEN_DIAMOND, count: 2 }
+};
+
+// 📊 Kariyer Ödülleri ($)
+const CAREER_REWARDS = {
+    [CAREER_LEVELS.PIONEER]: 400,
+    [CAREER_LEVELS.STAR]: 700,
+    [CAREER_LEVELS.LEADER]: 1200,
+    [CAREER_LEVELS.EMERALD]: 3000,
+    [CAREER_LEVELS.DIAMOND]: 5000,
+    [CAREER_LEVELS.BLUE_DIAMOND]: 15000,
+    [CAREER_LEVELS.GREEN_DIAMOND]: 40000,
+    [CAREER_LEVELS.RED_DIAMOND]: 80000
+};
+
+// 📊 Kariyer Sıralaması
+const CAREER_ORDER = [
+    CAREER_LEVELS.STARTER,
+    CAREER_LEVELS.PIONEER,
+    CAREER_LEVELS.STAR,
+    CAREER_LEVELS.LEADER,
+    CAREER_LEVELS.EMERALD,
+    CAREER_LEVELS.DIAMOND,
+    CAREER_LEVELS.BLUE_DIAMOND,
+    CAREER_LEVELS.GREEN_DIAMOND,
+    CAREER_LEVELS.RED_DIAMOND
+];
+
+// 📊 Aktiflik için minimum KV
+const MIN_KV_FOR_ACTIVE = 45;
+
+// 📊 Dönüşüm Oranları
+const CONVERSION = {
+    CV_PER_DOLLAR: 0.8,
+    PV_PER_DOLLAR: 0.8,
+    KV_PER_DOLLAR: 1.0
+};
+
+// 📊 Koç Tipleri
+const COACH_TYPES = {
+    STANDARD: 'standard',
+    MLM: 'mlm',
+    AKADEMI: 'akademi',
+    KISISEL: 'kisisel'
+};
+
+// 🔥 KOÇ PROMPTLARI
+const COACH_PROMPTS = {
+    // 📌 STANDARD - HERKESE AÇIK (ÜCRETSİZ)
+    [COACH_TYPES.STANDARD]: `Sen yardımsever bir asistan ve sohbet arkadaşısın. 
+    
+    **KURALLAR:**
+    1. Cevaplarını **MARKDOWN** formatında ver!
+    2. Günlük konularda yardımcı ol.
+    3. Genel bilgi ve tavsiyeler ver.
+    4. Samimi ve sıcak bir üslup kullan.
+    5. Emojileri doğal kullan (😊, 👍, ✨).
+    6. Kullanıcı "Koç" veya "Uzman" gibi taleplerde bulunursa, bu özelliklerin ücretli olduğunu belirt.`,
+
+    // 📌 MLM KOÇU
+    [COACH_TYPES.MLM]: `Sen bir MLM (Ağ Pazarlama) strateji koçusun. Ağ pazarlama, takım yönetimi ve satış stratejileri konusunda uzmansın.
+
+    **ÖNEMLİ KURALLAR:**
+    1. Cevaplarını **MARKDOWN** formatında ver!
+    2. Başlıklar için **#**, **##**, **###** kullan.
+    3. Önemli noktaları **kalın** yap.
+    4. Listeler için **-** veya **1.** kullan.
+    5. Vurgu için *italik* kullan.
+    6. Alıntılar için **>** kullan.
+    7. Emojileri doğal kullan (📈, 💡, 🎯, ✅, ⭐).
+    
+    **KONULAR:**
+    - Ağ pazarlama stratejileri
+    - Takım oluşturma ve yönetme
+    - Satış teknikleri
+    - Liderlik ve motivasyon
+    - Kariyer gelişimi
+    - Müşteri ilişkileri
+    - Hedef belirleme ve başarı planları`,
+
+    // 📌 AKADEMİK EĞİTİM KOÇU
+    [COACH_TYPES.AKADEMI]: `Sen bir akademik eğitim koçusun. Öğrenme teknikleri, sınav stratejileri ve akademik başarı konusunda uzmansın.
+
+    **ÖNEMLİ KURALLAR:**
+    1. Cevaplarını **MARKDOWN** formatında ver!
+    2. Başlıklar için **#**, **##** kullan.
+    3. Önemli noktaları **kalın** yap.
+    4. Listeler için **-** kullan.
+    5. Vurgu için *italik* kullan.
+    6. Emojileri doğal kullan (📚, 🎓, 💡, ✅).
+    
+    **KONULAR:**
+    - Etkili öğrenme teknikleri
+    - Sınav stratejileri
+    - Zaman yönetimi
+    - Akademik hedef belirleme
+    - Ders çalışma planları`,
+
+    // 📌 KİŞİSEL GELİŞİM KOÇU
+    [COACH_TYPES.KISISEL]: `Sen bir kişisel gelişim koçusun. Motivasyon, hedef belirleme, özgüven ve yaşam dengesi konusunda uzmansın.
+
+    **ÖNEMLİ KURALLAR:**
+    1. Cevaplarını **MARKDOWN** formatında ver!
+    2. Başlıklar için **#**, **##** kullan.
+    3. Önemli noktaları **kalın** yap.
+    4. Listeler için **-** kullan.
+    5. Vurgu için *italik* kullan.
+    6. Emojileri doğal kullan (🌟, 💪, 🎯, ✅).
+    
+    **KONULAR:**
+    - Motivasyon teknikleri
+    - Hedef belirleme
+    - Özgüven geliştirme
+    - Yaşam dengesi
+    - Kişisel farkındalık
+    - Başarı zihniyeti`
+};
+
+// 📊 KOÇ TİPLERİNİN PLAN EŞLEŞTİRMESİ
+// 🔥 Coach.AI ayrı bir plan değil, tüm planlarda mevcut!
+const COACH_PLAN_MAP,
+    MODEL_PLAN_MAP = {
+    'free': [COACH_TYPES.STANDARD],
+    'Lite': [COACH_TYPES.STANDARD, COACH_TYPES.MLM, COACH_TYPES.AKADEMI, COACH_TYPES.KISISEL],
+    'Plus': [COACH_TYPES.STANDARD, COACH_TYPES.MLM, COACH_TYPES.AKADEMI, COACH_TYPES.KISISEL],
+    'Pro': [COACH_TYPES.STANDARD, COACH_TYPES.MLM, COACH_TYPES.AKADEMI, COACH_TYPES.KISISEL]
+};
+
+module.exports = {
+    KV_MULTIPLIERS,
+    CAREER_LEVELS,
+    CAREER_REQUIREMENTS,
+    CAREER_REWARDS,
+    CAREER_ORDER,
+    MIN_KV_FOR_ACTIVE,
+    CONVERSION,
+    COACH_TYPES,
+    COACH_PROMPTS,
+    COACH_PLAN_MAP,
+    MODEL_PLAN_MAP
+};
+
+// 📊 MODEL VERSİYONLARI - PLAN EŞLEŞTİRMESİ
+    'free': ['1.0'],
+    'Lite': ['1.0'],
+    'Plus': ['1.0', '2.0'],
+    'Pro': ['1.0', '2.0', '2.1']
+};
+
+// 📊 MODEL VERSİYONLARI - PLAN EŞLEŞTİRMESİ
+    'free': ['1.0'],
+    'Lite': ['1.0'],
+    'Plus': ['1.0', '2.0'],
+    'Pro': ['1.0', '2.0', '2.1']
+};
+
+// 📊 MODEL VERSİYONLARI - PLAN EŞLEŞTİRMESİ
+const MODEL_PLAN_MAP = {
+    'free': ['1.0'],
+    'Lite': ['1.0'],
+    'Plus': ['1.0', '2.0'],
+    'Pro': ['1.0', '2.0', '2.1']
+};

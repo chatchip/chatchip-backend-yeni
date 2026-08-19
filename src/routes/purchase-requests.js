@@ -1,0 +1,132 @@
+const express = require('express');
+const router = express.Router();
+const pool = require('../config/database');
+const purchaseService = require('../services/purchaseService');
+
+router.post('/', async (req, res) => {
+    try {
+        const userId = req.user?.id || 1;
+        const { planName, period, amount, cv, kv } = req.body;
+        if (!planName || !amount) {
+            return res.status(400).json({ error: 'Plan adı ve miktar gerekli' });
+        }
+        const result = await pool.query(`
+            INSERT INTO purchase_requests (user_id, plan_name, period, amount, cv, status, created_at)
+            VALUES ($1, $2, $3, $4, $5, 'pending', NOW())
+            RETURNING id
+        `, [userId, planName, period || 'monthly', amount, cv || 0]);
+        res.json({
+            success: true,
+            message: '✅ Satın alma isteği oluşturuldu! Admin onayı bekleniyor.',
+            requestId: result.rows[0].id,
+            status: 'pending'
+        });
+    } catch (error) {
+        console.error('Purchase request error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+router.get('/pending', async (req, res) => {
+    try {
+        const result = await pool.query(`
+            SELECT 
+                pr.id, pr.user_id, u.name as user_name, u.email as user_email,
+                pr.plan_name, pr.period, pr.amount, pr.cv,
+                pr.status, pr.created_at,
+                TO_CHAR(pr.created_at, 'DD.MM.YYYY HH24:MI') as created_at_formatted
+            FROM purchase_requests pr
+            JOIN users u ON pr.user_id = u.id
+            WHERE pr.status = 'pending'
+            ORDER BY pr.created_at ASC
+        `);
+        res.json(result.rows);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+router.post('/:id/approve', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const request = await pool.query(`
+            SELECT user_id, plan_name, period, amount, cv FROM purchase_requests WHERE id = $1 AND status = 'pending'
+        `, [id]);
+        if (request.rows.length === 0) {
+            return res.status(404).json({ error: 'İstek bulunamadı veya zaten işlem görmüş' });
+        }
+        const { user_id, plan_name, period, amount, cv } = request.rows[0];
+        let cleanPlan = 'Lite';
+        if (plan_name && typeof plan_name === 'string') {
+            const planNameLower = plan_name.toLowerCase();
+            if (planNameLower.includes('lite')) cleanPlan = 'Lite';
+            else if (planNameLower.includes('plus')) cleanPlan = 'Plus';
+            else if (planNameLower.includes('pro')) cleanPlan = 'Pro';
+        }
+        console.log(`📝 Temizlenen plan: ${plan_name} → ${cleanPlan}`);
+        const result = await purchaseService.processPurchase(
+            user_id, amount, cv || 0, amount, cleanPlan, period || 'monthly'
+        );
+        if (!result.success) {
+            console.error('❌ processPurchase hatası:', result.error);
+            return res.status(500).json({ error: result.error });
+        }
+        console.log('✅ processPurchase başarılı:', result);
+        await pool.query(`
+            UPDATE purchase_requests SET status = 'approved', updated_at = NOW() WHERE id = $1
+        `, [id]);
+
+        // 🔥 KARİYER GÜNCELLE - DÜZELTİLDİ
+        try {
+            console.log(`🔄 Kariyer güncelleme başlatılıyor: Kullanıcı ${user_id}`);
+            const careerService = require('../services/careerService');
+            
+            if (!careerService) {
+                console.error('❌ careerService yüklenemedi!');
+            } else if (typeof careerService.updateCareerForUpline !== 'function') {
+                console.error('❌ updateCareerForUpline fonksiyonu bulunamadı!');
+                console.log('📋 Mevcut metodlar:', Object.keys(careerService));
+            } else {
+                const resultCareer = await careerService.updateCareerForUpline(user_id);
+                console.log(`✅ Kariyer güncelleme tamamlandı! Güncellenen kişi sayısı: ${resultCareer?.length || 0}`);
+            }
+        } catch (careerError) {
+            console.error('⚠️ Kariyer güncellenirken hata:', careerError.message);
+            console.error(careerError.stack);
+        }
+
+        res.json({
+            success: true,
+            message: `✅ ${plan_name} satın alma onaylandı!`,
+            plan: result.plan,
+            version: result.version,
+            expiresAt: result.expiresAt
+        });
+    } catch (error) {
+        console.error('❌ Approve error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+router.post('/:id/reject', async (req, res) => {
+    try {
+        const { id } = req.params;
+        const request = await pool.query(`
+            SELECT user_id, plan_name FROM purchase_requests WHERE id = $1 AND status = 'pending'
+        `, [id]);
+        if (request.rows.length === 0) {
+            return res.status(404).json({ error: 'İstek bulunamadı veya zaten işlem görmüş' });
+        }
+        await pool.query(`
+            UPDATE purchase_requests SET status = 'rejected', updated_at = NOW() WHERE id = $1
+        `, [id]);
+        res.json({
+            success: true,
+            message: `❌ ${request.rows[0].plan_name} satın alma isteği reddedildi.`
+        });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+module.exports = router;

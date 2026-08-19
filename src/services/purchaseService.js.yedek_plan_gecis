@@ -1,0 +1,168 @@
+const pool = require('../config/database');
+
+// 📊 PLAN - VERSİYON EŞLEŞTİRMESİ
+const PLAN_VERSION_MAP = {
+    'Lite': '1.0',
+    'Plus': '2.0',
+    'Pro': '2.1'
+};
+
+class PurchaseService {
+    
+    // 🔥 Satın alma - Kullanıcı planını ekle (bağımsız)
+    async processPurchase(userId, amount, cv, kv, planName, period) {
+        console.log(`🔄 ${userId} için satın alma işleniyor: $${amount}, Plan: ${planName}, Period: ${period}`);
+
+        try {
+            // 1. Plan tipini temizle
+            let cleanPlan = planName;
+            if (planName.includes('Lite')) cleanPlan = 'Lite';
+            else if (planName.includes('Plus')) cleanPlan = 'Plus';
+            else if (planName.includes('Pro')) cleanPlan = 'Pro';
+            else {
+                return { success: false, error: 'Geçersiz plan' };
+            }
+
+            // 2. Versiyonu belirle
+            const version = PLAN_VERSION_MAP[cleanPlan];
+            if (!version) {
+                return { success: false, error: 'Versiyon bulunamadı' };
+            }
+
+            // 3. Süre hesapla
+            let durationMs = 0;
+            const periodLower = (period || 'monthly').toLowerCase();
+            switch(periodLower) {
+                case 'monthly': durationMs = 30 * 24 * 60 * 60 * 1000; break;
+                case 'quarterly': durationMs = 90 * 24 * 60 * 60 * 1000; break;
+                case 'semiannual': durationMs = 180 * 24 * 60 * 60 * 1000; break;
+                case 'yearly': durationMs = 365 * 24 * 60 * 60 * 1000; break;
+                default: durationMs = 30 * 24 * 60 * 60 * 1000;
+            }
+            
+            const expiresAt = new Date(Date.now() + durationMs);
+            console.log(`📅 Süre: ${periodLower}, Bitiş: ${expiresAt}`);
+
+            // 4. 🔥 Kullanıcı planını EKLE
+            const insertResult = await pool.query(`
+                INSERT INTO user_plans (user_id, plan_type, version, started_at, expires_at, is_active)
+                VALUES ($1, $2, $3, NOW(), $4, true)
+                RETURNING id
+            `, [userId, cleanPlan, version, expiresAt]);
+
+            console.log(`✅ Yeni plan eklendi: ${cleanPlan} (${version}), ID: ${insertResult.rows[0].id}, bitiş: ${expiresAt}`);
+
+            // 5. Kullanıcının ana planını güncelle
+            await this.updateUserPrimaryPlan(userId);
+
+            // 6. Kullanıcının verilerini güncelle
+            await pool.query(`
+                UPDATE users SET 
+                    personal_cv = personal_cv + $1,
+                    personal_pv = personal_pv + $1,
+                    kv = kv + $2,
+                    updated_at = NOW()
+                WHERE id = $3
+            `, [cv, kv, userId]);
+
+            // 7. KV geçmişine ekle
+            if (kv > 0) {
+                await pool.query(`
+                    INSERT INTO kv_history (user_id, amount, earned_at)
+                    VALUES ($1, $2, NOW())
+                `, [userId, kv]);
+            }
+
+            // 8. Üst kollara dağıt
+            await this.distributeToUpline(userId, cv);
+
+            return { 
+                success: true, 
+                plan: cleanPlan,
+                version: version,
+                expiresAt: expiresAt,
+                planId: insertResult.rows[0].id
+            };
+        } catch (error) {
+            console.error('❌ processPurchase hatası:', error);
+            return { success: false, error: error.message };
+        }
+    }
+
+    // 🔥 Kullanıcının ana planını güncelle
+    async updateUserPrimaryPlan(userId) {
+        const result = await pool.query(`
+            SELECT plan_type, expires_at 
+            FROM user_plans 
+            WHERE user_id = $1 AND is_active = true AND expires_at > NOW()
+            ORDER BY expires_at DESC 
+            LIMIT 1
+        `, [userId]);
+
+        if (result.rows.length > 0) {
+            const { plan_type, expires_at } = result.rows[0];
+            await pool.query(`
+                UPDATE users 
+                SET plan_type = $1, plan_expires_at = $2 
+                WHERE id = $3
+            `, [plan_type, expires_at, userId]);
+            console.log(`📊 Ana plan güncellendi: ${plan_type}, bitiş: ${expires_at}`);
+        }
+    }
+
+    // 🔥 Üst kollara CV/PV dağıt
+    async distributeToUpline(userId, amount) {
+        console.log(`📤 ${userId} için üst kollara dağıtım başlıyor...`);
+        let currentId = userId;
+        let chain = [];
+        let maxLoop = 20;
+        
+        while (maxLoop-- > 0) {
+            const result = await pool.query(
+                'SELECT sponsor_id, position FROM users WHERE id = $1',
+                [currentId]
+            );
+            
+            if (result.rows.length === 0) break;
+            
+            const sponsorId = result.rows[0].sponsor_id;
+            const position = result.rows[0].position;
+            
+            if (!sponsorId) break;
+            
+            chain.push(sponsorId);
+            
+            if (position === 'left') {
+                await pool.query(`
+                    UPDATE users SET 
+                        left_cv = left_cv + $1, 
+                        left_pv = left_pv + $1 
+                    WHERE id = $2
+                `, [amount, sponsorId]);
+            } else if (position === 'right') {
+                await pool.query(`
+                    UPDATE users SET 
+                        right_cv = right_cv + $1, 
+                        right_pv = right_pv + $1 
+                    WHERE id = $2
+                `, [amount, sponsorId]);
+            }
+            currentId = sponsorId;
+        }
+        console.log(`✅ Dağıtım tamamlandı: ${chain.join(' → ')}`);
+        return chain;
+    }
+
+    // 📊 Kullanıcının aktif planlarını getir
+    async getUserPlans(userId) {
+        const result = await pool.query(`
+            SELECT id, plan_type, version, started_at, expires_at, is_active
+            FROM user_plans 
+            WHERE user_id = $1 AND is_active = true AND expires_at > NOW()
+            ORDER BY expires_at DESC
+        `, [userId]);
+        return result.rows;
+    }
+}
+
+module.exports = new PurchaseService();
