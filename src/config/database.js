@@ -1,10 +1,10 @@
 const { Pool } = require('pg');
 require('dotenv').config();
 
-// Node.js TLS sertifika doğrulamasını devre dışı bırak (self-signed sertifikalar için)
+// TLS sertifika kontrolünü devre dışı bırak
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
 
-console.log('🔍 DATABASE_URL:', process.env.DATABASE_URL ? '✅ VAR' : '❌ YOK');
+console.log('🔍 Veritabanı bağlantısı başlatılıyor...');
 
 if (!process.env.DATABASE_URL) {
     console.error('❌ DATABASE_URL bulunamadı!');
@@ -13,13 +13,14 @@ if (!process.env.DATABASE_URL) {
 
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
-    ssl: {
-        rejectUnauthorized: false
-    }
+    ssl: { rejectUnauthorized: false }
 });
 
 pool.connect()
     .then(() => console.log('✅ PostgreSQL bağlantısı başarılı!'))
-    .catch((err) => console.error('❌ PostgreSQL hatası:', err.message));
+    .catch((err) => {
+        console.error('❌ PostgreSQL hatası:', err.message);
+        console.error('📋 Hata kodu:', err.code);
+    });
 
 module.exports = pool;
