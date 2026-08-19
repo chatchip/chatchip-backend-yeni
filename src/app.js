@@ -14,7 +14,15 @@ const refundRoutes = require('./routes/refund.routes');
 
 const app = express();
 
-app.use(cors({ origin: '*' }));
+// 🔥 CORS - Railway URL'leri ile güncellendi
+app.use(cors({ 
+    origin: [
+        'http://localhost:3000',
+        'https://chatchip-app-production.up.railway.app'
+    ],
+    credentials: true
+}));
+
 app.use(helmet({
     crossOriginResourcePolicy: { policy: "cross-origin" },
     contentSecurityPolicy: false
