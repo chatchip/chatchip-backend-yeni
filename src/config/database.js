@@ -1,7 +1,15 @@
 const { Pool } = require('pg');
 require('dotenv').config();
 
-// Railway'de DATABASE_URL kullan
+console.log('🔍 DATABASE_URL kontrol ediliyor...');
+console.log('📡 DATABASE_URL:', process.env.DATABASE_URL ? '✅ VAR' : '❌ YOK');
+
+if (!process.env.DATABASE_URL) {
+    console.error('❌ DATABASE_URL bulunamadı!');
+    process.exit(1);
+}
+
+// SSL ayarlarını dene
 const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: { rejectUnauthorized: false }
