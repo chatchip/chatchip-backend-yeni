@@ -11,23 +11,39 @@ const pool = require('../config/database');
 // ============================================================
 router.post('/login', async (req, res) => {
     try {
+        console.log('📨 Login isteği:', req.body.email);
         const { email, password } = req.body;
+        
+        if (!email || !password) {
+            console.log('❌ Email veya şifre boş');
+            return res.status(400).json({ error: 'Email ve şifre gerekli' });
+        }
+
         const user = await User.findByEmail(email);
         
         if (!user) {
+            console.log('❌ Kullanıcı bulunamadı:', email);
             return res.status(401).json({ error: 'Email veya şifre hatalı' });
         }
 
+        console.log('👤 Kullanıcı bulundu:', user.email);
+        console.log('🔑 Hash karşılaştırılıyor...');
+        
         const valid = await bcrypt.compare(password, user.password_hash);
         if (!valid) {
+            console.log('❌ Şifre yanlış');
             return res.status(401).json({ error: 'Email veya şifre hatalı' });
         }
+
+        console.log('✅ Şifre doğru, token oluşturuluyor...');
 
         const token = jwt.sign(
             { id: user.id, email: user.email },
             process.env.JWT_SECRET || 'supersecretkey',
             { expiresIn: '7d' }
         );
+
+        console.log('✅ Login başarılı:', user.email);
 
         res.json({
             success: true,
@@ -42,6 +58,8 @@ router.post('/login', async (req, res) => {
             }
         });
     } catch (error) {
+        console.error('❌ Login hatası:', error.message);
+        console.error(error.stack);
         res.status(500).json({ error: error.message });
     }
 });
@@ -349,14 +367,12 @@ router.get('/get-bank', async (req, res) => {
     }
 });
 
-module.exports = router;
-
 // ============================================================
 // 📄 REGISTER SAYFASINI SERVE ET
 // ============================================================
 router.get('/register', (req, res) => {
-    // Parametreleri al
     const position = req.query.position || '';
-    // register.html'ye yönlendir
     res.redirect(`/register.html?position=${position}`);
 });
+
+module.exports = router;
