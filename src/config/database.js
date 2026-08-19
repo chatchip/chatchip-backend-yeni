@@ -1,18 +1,17 @@
 const { Pool } = require('pg');
 require('dotenv').config();
 
-console.log('🔍 DATABASE_URL:', process.env.DATABASE_URL ? '✅ VAR' : '❌ YOK');
+console.log('🔍 Veritabanı bağlantısı (ayrı değişkenler) kontrol ediliyor...');
 
-if (!process.env.DATABASE_URL) {
-    console.error('❌ DATABASE_URL bulunamadı!');
-    process.exit(1);
-}
-
-// SSL sertifika doğrulamasını devre dışı bırak
+// Railway'in sağladığı ayrı değişkenleri kullan
 const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
+    host: process.env.PGHOST,
+    port: process.env.PGPORT,
+    database: process.env.PGDATABASE,
+    user: process.env.PGUSER,
+    password: process.env.PGPASSWORD,
     ssl: {
-        rejectUnauthorized: false  // Bu satır çok önemli!
+        rejectUnauthorized: false
     }
 });
 
