@@ -47,7 +47,7 @@ async function callAI(version, messages) {
             model: config.model,
             messages: messages,
             stream: false,
-            temperature: 0.7,
+            temperature: 0.4,
             max_tokens: 4096
         }, {
             headers: {
@@ -84,7 +84,7 @@ async function callAIStream(version, messages, onChunk) {
             model: config.model,
             messages: messages,
             stream: true,
-            temperature: 0.7,
+            temperature: 0.4,
             max_tokens: 4096
         }, {
             headers: {
