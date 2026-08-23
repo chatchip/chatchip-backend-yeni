@@ -10,7 +10,6 @@ class FluxService {
         try {
             console.log(`🎨 Flux AI çağrılıyor: "${prompt}"`);
 
-            // 1. Görsel oluşturma isteği gönder
             const createResponse = await axios.post(`${this.baseUrl}/flux/kontext/generate`, {
                 prompt: prompt,
                 aspectRatio: "1:1",
@@ -31,7 +30,6 @@ class FluxService {
 
             console.log(`⏳ Görev ID: ${taskId}, görsel hazırlanıyor...`);
 
-            // 2. Polling - DOĞRU ENDPOINT
             let attempts = 0;
             const maxAttempts = 30;
 
@@ -40,7 +38,6 @@ class FluxService {
 
                 console.log(`📊 Durum kontrolü (${attempts + 1}/${maxAttempts})...`);
 
-                // 🔥 DOĞRU ENDPOINT
                 const url = `${this.baseUrl}/flux/kontext/record-info?taskId=${taskId}`;
                 console.log(`📡 Sorgulanıyor: ${url}`);
 
@@ -54,29 +51,30 @@ class FluxService {
                 const data = response.data;
                 console.log('📊 Yanıt:', JSON.stringify(data, null, 2));
 
-                // Dokümantasyona göre status kontrolü
-                const status = data?.data?.status; // 0: GENERATING, 1: SUCCESS, 2: FAILED, 3: GENERATE_FAILED
+                // 🔥 DOĞRU: successFlag kontrol et!
+                const successFlag = data?.data?.successFlag;
 
-                if (status === 1) { // SUCCESS
-                    const imageUrl = data?.data?.resultImageUrl || 
-                                   data?.data?.response?.resultImageUrl ||
-                                   data?.data?.image_url ||
-                                   data?.data?.url;
+                if (successFlag === 1) { // 1 = BAŞARILI
+                    // 🔥 DOĞRU: resultImageUrl'i yakala!
+                    const imageUrl = data?.data?.response?.resultImageUrl ||
+                                   data?.data?.resultImageUrl ||
+                                   data?.data?.response?.image_url ||
+                                   data?.data?.image_url;
 
                     if (imageUrl) {
                         console.log('✅ Görsel hazır!');
                         return { output: imageUrl };
                     }
 
-                    throw new Error('SUCCESS ama imageUrl bulunamadı: ' + JSON.stringify(data));
+                    throw new Error('SUCCESS ama imageUrl bulunamadı');
                 }
 
-                if (status === 2 || status === 3) {
+                if (successFlag === 2 || successFlag === 3) {
                     throw new Error('Görsel oluşturma başarısız oldu');
                 }
 
-                // status === 0 ise devam et (GENERATING)
-                console.log(`⏳ Hala işleniyor (status: ${status})...`);
+                // successFlag === 0 veya undefined ise devam et
+                console.log(`⏳ Hala işleniyor (successFlag: ${successFlag})...`);
 
                 attempts++;
             }
