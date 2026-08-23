@@ -1,74 +1,60 @@
 const axios = require('axios');
 
 // ============================================================
-// 🔥 MODEL KONFİGÜRASYONLARI (TEST - HEPSİ AYNI API)
+// 🔥 MODEL KONFİGÜRASYONLARI (DEEPSEEK DOĞRUDAN)
 // ============================================================
 const MODEL_CONFIGS = {
     '1.0': {
         id: '1.0',
         label: 'ChatChip 1.0',
-        provider: 'openrouter',
-        model: 'deepseek/deepseek-chat',
-        apiKey: process.env.OPENROUTER_API_KEY,
-        url: 'https://openrouter.ai/api/v1/chat/completions'
+        provider: 'deepseek',
+        model: 'deepseek-chat',
+        apiKey: process.env.DEEPSEEK_API_KEY,
+        url: 'https://api.deepseek.com/v1/chat/completions'
     },
     '2.0': {
         id: '2.0',
         label: 'ChatChip 2.0',
-        provider: 'openrouter',
-        model: 'deepseek/deepseek-chat',
-        apiKey: process.env.OPENROUTER_API_KEY,
-        url: 'https://openrouter.ai/api/v1/chat/completions'
+        provider: 'deepseek',
+        model: 'deepseek-chat',
+        apiKey: process.env.DEEPSEEK_API_KEY,
+        url: 'https://api.deepseek.com/v1/chat/completions'
     },
     '2.1': {
         id: '2.1',
         label: 'ChatChip 2.1',
-        provider: 'openrouter',
-        model: 'deepseek/deepseek-chat',
-        apiKey: process.env.OPENROUTER_API_KEY,
-        url: 'https://openrouter.ai/api/v1/chat/completions'
+        provider: 'deepseek',
+        model: 'deepseek-chat',
+        apiKey: process.env.DEEPSEEK_API_KEY,
+        url: 'https://api.deepseek.com/v1/chat/completions'
     }
 };
 
-// Varsayılan model
 const DEFAULT_MODEL = '1.0';
 
-// ============================================================
-// 🔥 MODEL ÇAĞRI
-// ============================================================
 async function callAI(version, messages) {
     const config = MODEL_CONFIGS[version];
-    
     if (!config) {
         console.error(`❌ Model bulunamadı: ${version}`);
         return "❌ Model bulunamadı. Lütfen geçerli bir versiyon seçin.";
     }
-
     console.log(`📡 AI çağrısı: ${config.label} (${config.provider})`);
-
     try {
-        if (!config.apiKey || config.apiKey === 'your_openrouter_api_key_here') {
-            return "🔑 OpenRouter API key'i eksik! .env dosyasına ekleyin.";
+        if (!config.apiKey || config.apiKey === 'sk-...') {
+            return "🔑 DeepSeek API key'i eksik! .env dosyasına ekleyin.";
         }
-
-        const response = await axios.post(
-            config.url,
-            {
-                model: config.model,
-                messages: messages,
-                stream: false,
-                temperature: 0.7,
-                max_tokens: 4096
-            },
-            {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${config.apiKey}`,
-                    'HTTP-Referer': 'https://chatchip-production.up.railway.app',
-                    'X-Title': 'ChatChip'
-                }
+        const response = await axios.post(config.url, {
+            model: config.model,
+            messages: messages,
+            stream: false,
+            temperature: 0.7,
+            max_tokens: 4096
+        }, {
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${config.apiKey}`
             }
-        );
+        });
         return response.data.choices[0].message.content;
     } catch (error) {
         console.error(`❌ ${config.label} hatası:`, error.response?.data || error.message);
@@ -76,45 +62,31 @@ async function callAI(version, messages) {
     }
 }
 
-// ============================================================
-// 📡 STREAM ÇAĞRI
-// ============================================================
 async function callAIStream(version, messages, onChunk) {
     const config = MODEL_CONFIGS[version];
-    
     if (!config) {
         onChunk('❌ Model bulunamadı');
         return;
     }
-
     console.log(`📡 AI Stream: ${config.label} (${config.provider})`);
-
     try {
-        if (!config.apiKey || config.apiKey === 'your_openrouter_api_key_here') {
-            onChunk("🔑 OpenRouter API key'i eksik! .env dosyasına ekleyin.");
+        if (!config.apiKey || config.apiKey === 'sk-...') {
+            onChunk("🔑 DeepSeek API key'i eksik! .env dosyasına ekleyin.");
             return;
         }
-
-        const response = await axios.post(
-            config.url,
-            {
-                model: config.model,
-                messages: messages,
-                stream: true,
-                temperature: 0.7,
-                max_tokens: 4096
+        const response = await axios.post(config.url, {
+            model: config.model,
+            messages: messages,
+            stream: true,
+            temperature: 0.7,
+            max_tokens: 4096
+        }, {
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${config.apiKey}`
             },
-            {
-                headers: {
-                    'Content-Type': 'application/json',
-                    'Authorization': `Bearer ${config.apiKey}`,
-                    'HTTP-Referer': 'https://chatchip-production.up.railway.app',
-                    'X-Title': 'ChatChip'
-                },
-                responseType: 'stream'
-            }
-        );
-
+            responseType: 'stream'
+        });
         response.data.on('data', (chunk) => {
             const lines = chunk.toString().split('\n');
             for (const line of lines) {
@@ -129,7 +101,6 @@ async function callAIStream(version, messages, onChunk) {
                 }
             }
         });
-
         await new Promise((resolve, reject) => {
             response.data.on('end', resolve);
             response.data.on('error', reject);
@@ -140,9 +111,6 @@ async function callAIStream(version, messages, onChunk) {
     }
 }
 
-// ============================================================
-// 📊 MODEL BİLGİLERİNİ GETİR
-// ============================================================
 function getAvailableModels() {
     return Object.values(MODEL_CONFIGS).map(c => ({
         version: c.id,
