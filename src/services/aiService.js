@@ -64,7 +64,7 @@ async function callAI(version, messages) {
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${config.apiKey}`,
-                    'HTTP-Referer': 'http://localhost:5000',
+                    'HTTP-Referer': 'https://chatchip-production.up.railway.app',
                     'X-Title': 'ChatChip'
                 }
             }
@@ -108,7 +108,7 @@ async function callAIStream(version, messages, onChunk) {
                 headers: {
                     'Content-Type': 'application/json',
                     'Authorization': `Bearer ${config.apiKey}`,
-                    'HTTP-Referer': 'http://localhost:5000',
+                    'HTTP-Referer': 'https://chatchip-production.up.railway.app',
                     'X-Title': 'ChatChip'
                 },
                 responseType: 'stream'
