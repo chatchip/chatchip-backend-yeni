@@ -51,7 +51,7 @@ async function callAI(version, messages) {
             max_tokens: 4096
         }, {
             headers: {
-                'Content-Type': 'application/json',
+                'Content-Type': 'application/json; charset=utf-8',
                 'Authorization': `Bearer ${config.apiKey}`
             }
         });
@@ -63,6 +63,12 @@ async function callAI(version, messages) {
 }
 
 async function callAIStream(version, messages, onChunk) {
+    // 🔥 Türkçe karakterleri normalize et
+    messages = messages.map(msg => ({
+        ...msg,
+        content: msg.content.normalize('NFC')
+    }));
+    
     const config = MODEL_CONFIGS[version];
     if (!config) {
         onChunk('❌ Model bulunamadı');
@@ -82,7 +88,7 @@ async function callAIStream(version, messages, onChunk) {
             max_tokens: 4096
         }, {
             headers: {
-                'Content-Type': 'application/json',
+                'Content-Type': 'application/json; charset=utf-8',
                 'Authorization': `Bearer ${config.apiKey}`
             },
             responseType: 'stream'
