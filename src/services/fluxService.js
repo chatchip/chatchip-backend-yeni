@@ -10,6 +10,7 @@ class FluxService {
         try {
             console.log(`🎨 Flux AI çağrılıyor: "${prompt}"`);
 
+            // 1. Görsel oluşturma isteği gönder
             const createResponse = await axios.post(`${this.baseUrl}/flux/kontext/generate`, {
                 prompt: prompt,
                 aspectRatio: "1:1",
@@ -30,6 +31,7 @@ class FluxService {
 
             console.log(`⏳ Görev ID: ${taskId}, görsel hazırlanıyor...`);
 
+            // 2. Polling - DOĞRU ENDPOINT
             let attempts = 0;
             const maxAttempts = 30;
 
@@ -38,61 +40,43 @@ class FluxService {
 
                 console.log(`📊 Durum kontrolü (${attempts + 1}/${maxAttempts})...`);
 
-                const endpoints = [
-                    `${this.baseUrl}/flux/kontext/result?taskId=${taskId}`,
-                    `${this.baseUrl}/flux/kontext/status/${taskId}`,
-                    `${this.baseUrl}/flux/kontext/task/${taskId}/status`
-                ];
+                // 🔥 DOĞRU ENDPOINT
+                const url = `${this.baseUrl}/flux/kontext/record-info?taskId=${taskId}`;
+                console.log(`📡 Sorgulanıyor: ${url}`);
 
-                let found = false;
-
-                for (const url of endpoints) {
-                    try {
-                        const response = await axios.get(url, {
-                            headers: {
-                                'Authorization': `Bearer ${this.apiKey}`,
-                                'Content-Type': 'application/json'
-                            }
-                        });
-
-                        const data = response.data;
-                        console.log('📊 Gelen Durum Yanıtı:', JSON.stringify(data, null, 2));
-
-                        const status = data?.data?.status || data?.status || data?.state || data?.data?.state;
-
-                        // 🔥 TÜM OLASI URL ALANLARI
-                        const imageUrl = data?.data?.response?.resultImageUrl ||
-                                       data?.data?.response?.image_url ||
-                                       data?.data?.result?.image_url ||
-                                       data?.data?.image_url ||
-                                       data?.data?.url ||
-                                       data?.data?.response?.url ||
-                                       data?.resultImageUrl ||
-                                       data?.url;
-
-                        if (imageUrl) {
-                            console.log('✅ Görsel hazır ve yakalandı:', imageUrl);
-                            return { output: imageUrl };
-                        }
-
-                        if (status === 'completed' || status === 'succeeded' || status === 'done' || status === 'success') {
-                            throw new Error('İşlem tamamlandı fakat görsel URL adresi bulunamadı: ' + JSON.stringify(data));
-                        }
-
-                        if (status === 'failed' || status === 'error') {
-                            throw new Error('Görsel oluşturma başarısız oldu');
-                        }
-
-                        found = true;
-                        break;
-
-                    } catch (error) {
-                        if (error.response?.status === 404) {
-                            continue;
-                        }
-                        if (error.message.includes('görsel URL adresi bulunamadı')) throw error;
+                const response = await axios.get(url, {
+                    headers: {
+                        'Authorization': `Bearer ${this.apiKey}`,
+                        'Content-Type': 'application/json'
                     }
+                });
+
+                const data = response.data;
+                console.log('📊 Yanıt:', JSON.stringify(data, null, 2));
+
+                // Dokümantasyona göre status kontrolü
+                const status = data?.data?.status; // 0: GENERATING, 1: SUCCESS, 2: FAILED, 3: GENERATE_FAILED
+
+                if (status === 1) { // SUCCESS
+                    const imageUrl = data?.data?.resultImageUrl || 
+                                   data?.data?.response?.resultImageUrl ||
+                                   data?.data?.image_url ||
+                                   data?.data?.url;
+
+                    if (imageUrl) {
+                        console.log('✅ Görsel hazır!');
+                        return { output: imageUrl };
+                    }
+
+                    throw new Error('SUCCESS ama imageUrl bulunamadı: ' + JSON.stringify(data));
                 }
+
+                if (status === 2 || status === 3) {
+                    throw new Error('Görsel oluşturma başarısız oldu');
+                }
+
+                // status === 0 ise devam et (GENERATING)
+                console.log(`⏳ Hala işleniyor (status: ${status})...`);
 
                 attempts++;
             }
