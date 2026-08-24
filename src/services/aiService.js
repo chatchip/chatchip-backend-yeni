@@ -1,8 +1,5 @@
 const axios = require('axios');
 
-// ============================================================
-// 🔥 MODEL KONFİGÜRASYONLARI (DEEPSEEK DOĞRUDAN)
-// ============================================================
 const MODEL_CONFIGS = {
     '1.0': {
         id: '1.0',
@@ -31,6 +28,30 @@ const MODEL_CONFIGS = {
 };
 
 const DEFAULT_MODEL = '1.0';
+
+async function getSessionMessages(apiSessionId) {
+    try {
+        const config = MODEL_CONFIGS['1.0'];
+        if (!config.apiKey || config.apiKey === 'sk-...') {
+            console.warn('⚠️ DeepSeek API key eksik, mesajlar çekilemiyor');
+            return [];
+        }
+        
+        const response = await axios.get(
+            `https://api.deepseek.com/v1/sessions/${apiSessionId}/messages`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${config.apiKey}`
+                }
+            }
+        );
+        
+        return response.data.messages || [];
+    } catch (error) {
+        console.error(`❌ Session mesajları çekilemedi (${apiSessionId}):`, error.response?.data || error.message);
+        return [];
+    }
+}
 
 async function callAI(version, messages) {
     const config = MODEL_CONFIGS[version];
@@ -62,8 +83,7 @@ async function callAI(version, messages) {
     }
 }
 
-async function callAIStream(version, messages, onChunk) {
-    // 🔥 Türkçe karakterleri normalize et
+async function callAIStream(version, messages, onChunk, apiSessionId) {
     messages = messages.map(msg => ({
         ...msg,
         content: msg.content.normalize('NFC')
@@ -74,19 +94,26 @@ async function callAIStream(version, messages, onChunk) {
         onChunk('❌ Model bulunamadı');
         return;
     }
-    console.log(`📡 AI Stream: ${config.label} (${config.provider})`);
+    console.log(`📡 AI Stream: ${config.label} (${config.provider}), Session: ${apiSessionId || 'yeni'}`);
     try {
         if (!config.apiKey || config.apiKey === 'sk-...') {
             onChunk("🔑 DeepSeek API key'i eksik! .env dosyasına ekleyin.");
             return;
         }
-        const response = await axios.post(config.url, {
+        
+        const requestBody = {
             model: config.model,
             messages: messages,
             stream: true,
             temperature: 0.4,
             max_tokens: 4096
-        }, {
+        };
+        
+        if (apiSessionId) {
+            requestBody.session_id = apiSessionId;
+        }
+        
+        const response = await axios.post(config.url, requestBody, {
             headers: {
                 'Content-Type': 'application/json; charset=utf-8',
                 'Authorization': `Bearer ${config.apiKey}`
@@ -133,6 +160,7 @@ module.exports = {
     callAIStream,
     getAvailableModels,
     isValidVersion,
+    getSessionMessages,
     MODEL_CONFIGS,
     DEFAULT_MODEL
 };

@@ -1,19 +1,16 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../config/database');
-const { callAIStream, getAvailableModels, isValidVersion, DEFAULT_MODEL } = require('../services/aiService');
+const { callAIStream, getAvailableModels, isValidVersion, DEFAULT_MODEL, getSessionMessages } = require('../services/aiService');
 const { COACH_PROMPTS, COACH_TYPES, COACH_PLAN_MAP } = require('../utils/constants');
 
-// ============================================================
-// 📋 SOHBET SESSİONLARI
-// ============================================================
 router.get('/sessions', async (req, res) => {
     try {
         const userId = req.user?.id || 1;
         
         const result = await pool.query(`
-            SELECT id, title, is_pinned, created_at, updated_at,
-                   (SELECT COUNT(*) FROM chat_messages WHERE session_id = chat_sessions.id) as message_count
+            SELECT id, title, is_pinned, created_at, updated_at, 
+                   api_session_id, message_count
             FROM chat_sessions
             WHERE user_id = $1
             ORDER BY is_pinned DESC, updated_at DESC
@@ -29,16 +26,13 @@ router.get('/sessions', async (req, res) => {
     }
 });
 
-// ============================================================
-// 📋 SOHBET SESSİON DETAYI
-// ============================================================
 router.get('/sessions/:id', async (req, res) => {
     try {
         const userId = req.user?.id || 1;
         const sessionId = req.params.id;
         
         const sessionResult = await pool.query(`
-            SELECT id, title, is_pinned, created_at, updated_at
+            SELECT id, title, is_pinned, api_session_id, created_at, updated_at
             FROM chat_sessions
             WHERE id = $1 AND user_id = $2
         `, [sessionId, userId]);
@@ -47,17 +41,21 @@ router.get('/sessions/:id', async (req, res) => {
             return res.status(404).json({ error: 'Sohbet bulunamadı' });
         }
         
-        const messagesResult = await pool.query(`
-            SELECT id, role, content, created_at
-            FROM chat_messages
-            WHERE session_id = $1
-            ORDER BY created_at ASC
-        `, [sessionId]);
+        const session = sessionResult.rows[0];
+        
+        let messages = [];
+        if (session.api_session_id) {
+            try {
+                messages = await getSessionMessages(session.api_session_id);
+            } catch (apiError) {
+                console.error('API mesaj çekme hatası:', apiError.message);
+            }
+        }
         
         res.json({
             success: true,
-            session: sessionResult.rows[0],
-            messages: messagesResult.rows
+            session: session,
+            messages: messages
         });
     } catch (error) {
         console.error('Session detail error:', error);
@@ -65,19 +63,18 @@ router.get('/sessions/:id', async (req, res) => {
     }
 });
 
-// ============================================================
-// 🔥 YENİ SOHBET SESSİONU
-// ============================================================
 router.post('/sessions', async (req, res) => {
     try {
         const userId = req.user?.id || 1;
         const { title } = req.body;
         
+        const apiSessionId = `session_${userId}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+        
         const result = await pool.query(`
-            INSERT INTO chat_sessions (user_id, title)
-            VALUES ($1, $2)
-            RETURNING id, title, is_pinned, created_at, updated_at
-        `, [userId, title || 'Yeni Sohbet']);
+            INSERT INTO chat_sessions (user_id, title, api_session_id, message_count)
+            VALUES ($1, $2, $3, 0)
+            RETURNING id, title, is_pinned, api_session_id, created_at, updated_at
+        `, [userId, title || 'Yeni Sohbet', apiSessionId]);
         
         res.json({
             success: true,
@@ -89,9 +86,6 @@ router.post('/sessions', async (req, res) => {
     }
 });
 
-// ============================================================
-// ✏️ SOHBET BAŞLIĞINI GÜNCELLE
-// ============================================================
 router.put('/sessions/:id', async (req, res) => {
     try {
         const userId = req.user?.id || 1;
@@ -123,9 +117,6 @@ router.put('/sessions/:id', async (req, res) => {
     }
 });
 
-// ============================================================
-// 📌 SOHBET SABITLE
-// ============================================================
 router.post('/sessions/:id/pin', async (req, res) => {
     try {
         const userId = req.user?.id || 1;
@@ -153,9 +144,6 @@ router.post('/sessions/:id/pin', async (req, res) => {
     }
 });
 
-// ============================================================
-// 🗑️ SOHBET SİL
-// ============================================================
 router.delete('/sessions/:id', async (req, res) => {
     try {
         const userId = req.user?.id || 1;
@@ -181,9 +169,6 @@ router.delete('/sessions/:id', async (req, res) => {
     }
 });
 
-// ============================================================
-// 📊 KULLANICININ ERİŞEBİLECEĞİ MODELLER
-// ============================================================
 router.get('/models', async (req, res) => {
     try {
         const userId = req.user?.id || 1;
@@ -214,9 +199,6 @@ router.get('/models', async (req, res) => {
     }
 });
 
-// ============================================================
-// 💬 CHAT STREAM - MODEL + KOÇ (İPTAL DESTEKLİ)
-// ============================================================
 router.post('/stream', async (req, res) => {
     try {
         const { message, version, coachType, systemPrompt, sessionId } = req.body;
@@ -264,20 +246,24 @@ router.post('/stream', async (req, res) => {
         }
 
         let currentSessionId = sessionId;
+        let apiSessionId = null;
         
         if (!currentSessionId) {
+            apiSessionId = `session_${userId}_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
             const sessionResult = await pool.query(`
-                INSERT INTO chat_sessions (user_id, title)
-                VALUES ($1, $2)
+                INSERT INTO chat_sessions (user_id, title, api_session_id, message_count)
+                VALUES ($1, $2, $3, 0)
                 RETURNING id
-            `, [userId, message.substring(0, 30) + '...']);
+            `, [userId, message.substring(0, 30) + '...', apiSessionId]);
             currentSessionId = sessionResult.rows[0].id;
+        } else {
+            const sessionResult = await pool.query(`
+                SELECT api_session_id FROM chat_sessions WHERE id = $1 AND user_id = $2
+            `, [currentSessionId, userId]);
+            if (sessionResult.rows.length > 0) {
+                apiSessionId = sessionResult.rows[0].api_session_id;
+            }
         }
-
-        await pool.query(`
-            INSERT INTO chat_messages (session_id, role, content)
-            VALUES ($1, 'user', $2)
-        `, [currentSessionId, message]);
 
         let systemContent = COACH_PROMPTS[selectedCoach] || COACH_PROMPTS[COACH_TYPES.STANDARD];
         
@@ -295,7 +281,6 @@ router.post('/stream', async (req, res) => {
         res.setHeader('Connection', 'keep-alive');
         res.setHeader('Access-Control-Allow-Origin', '*');
 
-        // 🔥 CLIENT BAĞLANTISI KOPTUĞUNDA STREAM'İ İPTAL ET
         let isStreamActive = true;
         
         req.on('close', () => {
@@ -308,7 +293,6 @@ router.post('/stream', async (req, res) => {
             }
         });
 
-        // 🔥 ABORT KONTROLÜ (signal ile)
         if (req.aborted) {
             console.log('⏹️ İstek iptal edildi (aborted)');
             return res.end();
@@ -316,7 +300,6 @@ router.post('/stream', async (req, res) => {
 
         let fullResponse = '';
 
-        // 🔥 STREAM ÇAĞRISI - isActive kontrolü ile
         await callAIStream(selectedVersion, messages, (chunk) => {
             if (!isStreamActive) {
                 console.log('⏹️ Stream pasif, chunk atlanıyor');
@@ -324,17 +307,14 @@ router.post('/stream', async (req, res) => {
             }
             fullResponse += chunk;
             res.write(`data: ${JSON.stringify({ chunk, sessionId: currentSessionId })}\n\n`);
-        });
+        }, apiSessionId);
 
-        // Eğer stream hala aktifse sonuçları kaydet
         if (isStreamActive) {
             await pool.query(`
-                INSERT INTO chat_messages (session_id, role, content)
-                VALUES ($1, 'assistant', $2)
-            `, [currentSessionId, fullResponse || 'Yanıt alınamadı']);
-
-            await pool.query(`
-                UPDATE chat_sessions SET updated_at = NOW() WHERE id = $1
+                UPDATE chat_sessions 
+                SET message_count = message_count + 1,
+                    updated_at = NOW() 
+                WHERE id = $1
             `, [currentSessionId]);
 
             res.write(`data: ${JSON.stringify({ done: true, sessionId: currentSessionId })}\n\n`);
@@ -352,15 +332,13 @@ router.post('/stream', async (req, res) => {
     }
 });
 
-// 📋 CHAT GEÇMİŞİ
 router.get('/history', async (req, res) => {
     try {
         const userId = req.user?.id || 1;
         const { limit = 20 } = req.query;
         
         const result = await pool.query(`
-            SELECT id, title, is_pinned, created_at, updated_at,
-                   (SELECT COUNT(*) FROM chat_messages WHERE session_id = chat_sessions.id) as message_count
+            SELECT id, title, is_pinned, api_session_id, message_count, created_at, updated_at
             FROM chat_sessions
             WHERE user_id = $1
             ORDER BY is_pinned DESC, updated_at DESC
